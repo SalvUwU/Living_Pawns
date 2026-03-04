@@ -1,4 +1,7 @@
-# Pawn Game
+# Living_Pawns
+
+This project contains code for a game based on chess containing only pawns.
+This game was made for "The 6 Heroes Festival", a DnD (inspired) Campaign created by this project's author.
 
 ## How to play
 
