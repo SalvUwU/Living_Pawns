@@ -447,7 +447,7 @@ int matrix(int guy, int opponent){
 
 /**
  * @brief Generates initial population setting genotype to random values between -1 and 1 in every connection's weight.
- *  While coordinated with other processes.
+ * Coordinated with other processes.
  */
 void gen_init_pop_proc(){
     sem_wait(sem_guys);
@@ -535,7 +535,7 @@ bool generate_init_population(){
 
 /**
  * @brief Tests a generation of Individuals.
- *  While coordinated with other processes.
+ * Coordinated with other processes.
  */
 void test_pop_proc(){
     sem_wait(sem_guys);
@@ -597,6 +597,7 @@ void test_population(){
     #endif
 }
 
+// TODO: Understand this
 /**
  * @brief Creates a vector with population's indexes organized by "normalized" fitness.
  * 
@@ -729,6 +730,36 @@ void mutate(int guy){
 /**
  * @brief Creates new population through crossover and mutation.
  * Maintains an elite of a predefined number of Individuals.
+ * Coordinated with other processes.
+ */
+void regen_pop_proc(){
+    srand(time(NULL)+i);
+
+    sem_wait(sem_guys);
+
+    while(guyIndex->index < POPULATION_NUM){
+        guy = (guyIndex->index)++;
+        sem_post(sem_guys);
+
+        // Crossover
+        if(rand()%100 < CROSSOVER_PROB){
+            crossover(guy, roulette(), roulette());
+        }
+
+        // Mutation
+        mutate(guy);
+
+        sem_wait(sem_guys);
+        // Mark order's item as complete
+        (*compOrder)++;
+    }
+    
+    sem_post(sem_guys);
+}
+
+/**
+ * @brief Creates new population through crossover and mutation.
+ * Maintains an elite of a predefined number of Individuals.
  */
 void repopulate(){
     if(pawnStars == NULL) return;
@@ -737,36 +768,22 @@ void repopulate(){
     if(guyIndex == NULL) return;
 
     guyIndex->index = ELITE_LEN;
+    *compOrder = ELITE_LEN;
 
-    // Distributed through PROCESS_NUM processes for faster execution
-    for(int i = 0, guy; i < PROCESS_NUM; i++){
-        process = i;
+    // Define order to give to processes
+    *order = REGEN_POP;
+    sem_post(sig_order);
 
-        if(fork() == 0){
-            srand(time(NULL)+i);
-
-            sem_wait(sem_guys);
-            while(guyIndex->index < POPULATION_NUM){
-                guy = (guyIndex->index)++;
-                sem_post(sem_guys);
-
-                // Crossover
-                if(rand()%100 < CROSSOVER_PROB){
-                    crossover(guy, roulette(), roulette());
-                }
-
-                // Mutation
-                mutate(guy);
-
-                sem_wait(sem_guys);
-            }
-            sem_post(sem_guys);
-
-            exit(0);
-        }
+    // Wait for all items relevant to given order to be completed
+    sem_wait(sem_guys);
+    while(*compOrder < POPULATION_NUM){
+        sem_post(sem_guys);
+        sem_wait(sem_guys);
     }
 
-    while(wait(NULL) != -1);
+    // Reset order values
+    *compOrder = 0;
+    *order = NO_ORDER;
 
     #else
 
@@ -870,6 +887,7 @@ void work(){
 
             case REGEN_POP:
                 // TODO: Re-generate population
+                regen_pop_proc();
                 break;
 
             case TEST_POP:
