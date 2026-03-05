@@ -1,4 +1,4 @@
-// #define UNIX
+#define UNIX
 #define WHOLE_BOARD
 // #define DEBUG
 // #define DEBUG_NETWORK
@@ -69,6 +69,7 @@
 
 #define PROCESS_NUM 6
 #define SEM_GUYS "SEM_GUYS"
+#define SIG_ORDER "SIG_ORDER"
 
 using namespace std;
 
@@ -85,6 +86,8 @@ struct Guy{
 struct GIndex{
     int index;
 };
+
+enum Order {NO_ORDER, GEN_POP, REGEN_POP, TEST_POP, TERMINATE};
 
 Action actions[] = {
     {0, SE}, {0, South}, {0, SW},
@@ -110,14 +113,16 @@ pid_t mainProc;
 GIndex *guyIndex = NULL;
 Guy *pawnStars = NULL;
 Guy oldPop[POPULATION_NUM];
+Order *order = NULL;
+int *compOrder = NULL;
 
 vector<int> prob;
 
 int process;
 
 #ifdef UNIX
-int guyIshmid = -1, pawnSshmid = -1;
-sem_t *sem_guys;
+int guyIshmid = -1, pawnSshmid = -1, ordershmid = -1, compOshmid = -1;
+sem_t *sem_guys, *sig_order;
 #endif
 
 bool compare_guys(Guy g1, Guy g2){
@@ -508,42 +513,58 @@ bool generate_init_population(){
 }
 
 /**
+ * @brief Tests a generation of Individuals while coordinated with other processes.
+ */
+void test_pop_proc(){
+    sem_wait(sem_guys);
+
+    while(guyIndex->index < POPULATION_NUM){
+        // Get next guy
+        guy = (guyIndex->index)++;
+
+        #ifdef DEBUG_TESTING
+        cout << "New test: " << process << " " << guy << "\n";
+        #endif
+
+        sem_post(sem_guys);
+
+        // Simulate guy's game
+        pawnStars[guy].fitness = matrix(guy, 0);
+
+        sem_wait(sem_guys);
+        // Mark order's item as complete
+        (*compOrder)++;
+    }
+
+    sem_post(sem_guys);
+}
+
+/**
  * @brief Tests a generation of Individuals.
  */
 void test_population(){
     if(pawnStars == NULL) return;
     
     #ifdef UNIX
-    if(guyIndex == NULL) return;
+    if(guyIndex == NULL || PROCESS_NUM <= 0) return;
 
     guyIndex->index = 0;
+    *compOrder = 0;
 
-    // Distributed through PROCESS_NUM processes for faster execution
-    for(int i = 0, guy; i < PROCESS_NUM; i++){
-        process = i;
+    // Define order to give to processes
+    *order = TEST_POP;
+    sem_post(sig_order);
 
-        if(fork() == 0){
-            sem_wait(sem_guys);
-            while(guyIndex->index < POPULATION_NUM){
-                guy = (guyIndex->index)++;
-
-                #ifdef DEBUG_TESTING
-                cout << "New test: " << process << " " << guy << "\n";
-                #endif
-
-                sem_post(sem_guys);
-
-                pawnStars[guy].fitness = matrix(guy, 0);
-
-                sem_wait(sem_guys);
-            }
-            sem_post(sem_guys);
-
-            exit(0);
-        }
+    // Wait for all items relevant to given order to be completed
+    sem_wait(sem_guys);
+    while(*compOrder < POPULATION_NUM){
+        sem_post(sem_guys);
+        sem_wait(sem_guys);
     }
 
-    while(wait(NULL) != -1);
+    // Reset order values
+    *compOrder = 0;
+    *order = NO_ORDER;
     
     #else
 
@@ -807,10 +828,73 @@ void evolve(Guy& progenitor){
     save_guy(*pawnStars);
 }
 
+#ifdef UNIX
+/**
+ * @brief Waits for an order. Acts accordingly to received order.
+ */
+void work(){
+    while(*order != TERMINATE){
+        sem_wait(sig_order);
+        
+        switch(*order){
+            case GEN_POP:
+                // TODO: Generate population
+                break;
+
+            case REGEN_POP:
+                // TODO: Re-generate population
+                break;
+
+            case TEST_POP:
+                // Test population
+                test_pop_proc();
+                break;
+
+            case TERMINATE:
+                // Terminate process
+                exit(0);
+
+            case NO_ORDER:
+                // No orders
+                break;
+
+            default:
+                // Unknown Order
+                break;
+        }
+    }
+
+    exit(0);
+}
+
+/**
+ * @brief Create task sharing processes
+ * 
+ * @param n_procs number of processes to create
+ */
+void create_procs(int n_procs){
+    process = 0;
+
+    for(int proc = 1; proc < n_procs; proc++){
+        if(fork() == 0){
+            process = proc;
+
+            work();
+
+            exit(0);
+        }
+    }
+}
+#endif
+
 /**
  * @brief Detaches shared memory and semaphore.
  */
 void clear(int sig){
+    #ifdef UNIX
+    if(process != 0) exit(0);
+    #endif
+
     switch(sig){
         case SIGINT:
             cout << " SIGINT received, terminating\n";
@@ -836,6 +920,8 @@ void clear(int sig){
     fclose(execfile);
     
     #ifdef UNIX
+    while(wait(NULL) != -1);
+
     if(getpid() != mainProc) exit(0);
 
     if(guyIndex != NULL){
@@ -856,10 +942,34 @@ void clear(int sig){
         pawnSshmid = -1;
     }
 
+    if(order != NULL){
+        shmdt(order);
+        order = NULL;
+    }
+    if(ordershmid >= 0){
+        shmctl(ordershmid, IPC_RMID, NULL);
+        ordershmid = -1;
+    }
+
+    if(compOrder != NULL){
+        shmdt(compOrder);
+        compOrder = NULL;
+    }
+    if(compOshmid >= 0){
+        shmctl(compOshmid, IPC_RMID, NULL);
+        compOshmid = -1;
+    }
+
     if(sem_guys){
         sem_close(sem_guys);
         sem_unlink(SEM_GUYS);
         sem_guys = NULL;
+    }
+
+    if(sig_order){
+        sem_close(sig_order);
+        sem_unlink(SIG_ORDER);
+        sig_order = NULL;
     }
 
     #else
@@ -910,10 +1020,34 @@ int init(){
 		return -4;
     }
 
+    if((ordershmid = shmget(IPC_PRIVATE, sizeof(Order), IPC_CREAT | 0766)) < 0){
+		return -5;
+    }
+    if((order = (Order*) shmat(ordershmid, NULL, 0)) == (Order*)-1){
+        order = NULL;
+		return -6;
+    }
+    *order = NO_ORDER;
+
+    if((compOshmid = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0766)) < 0){
+		return -5;
+    }
+    if((compOrder = (int*) shmat(compOshmid, NULL, 0)) == (int*)-1){
+        compOrder = NULL;
+		return -6;
+    }
+    *compOrder = 0;
+
     sem_unlink(SEM_GUYS);
 	if((sem_guys = sem_open(SEM_GUYS, O_CREAT|O_EXCL, 0700, 1)) == SEM_FAILED){
         sem_guys = NULL;
-        return -5;
+        return -7;
+    }
+
+    sem_unlink(SIG_ORDER);
+	if((sig_order = sem_open(SIG_ORDER, O_CREAT|O_EXCL, 0700, 0)) == SEM_FAILED){
+        sig_order = NULL;
+        return -8;
     }
     #else
 
@@ -1115,6 +1249,7 @@ int main(int argc, char *argv[]){
         play_match();
 
         free(pawnStars);
+        pawnStars = NULL;
     }
 
     // Test an individual
@@ -1141,6 +1276,7 @@ int main(int argc, char *argv[]){
         test_guy();
 
         free(pawnStars);
+        pawnStars = NULL;
     }
 
     else{
