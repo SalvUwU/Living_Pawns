@@ -87,7 +87,7 @@ struct GIndex{
     int index;
 };
 
-enum Order {NO_ORDER, GEN_POP, REGEN_POP, TEST_POP, TERMINATE};
+enum Order {NO_ORDER, GEN_INIT_POP, GEN_POP, REGEN_POP, TEST_POP, TERMINATE};
 
 Action actions[] = {
     {0, SE}, {0, South}, {0, SW},
@@ -447,9 +447,44 @@ int matrix(int guy, int opponent){
 
 /**
  * @brief Generates initial population setting genotype to random values between -1 and 1 in every connection's weight.
+ *  While coordinated with other processes.
+ */
+void gen_init_pop_proc(){
+    sem_wait(sem_guys);
+
+    while(guyIndex->index < POPULATION_NUM){
+        // Get next guy
+        guy = (guyIndex->index)++;
+        sem_post(sem_guys);
+
+        for(int i = 0, random; i < CONNECT_NUM; i++){
+            random = rand();
+
+            // Assign random values to this
+            pawnStars[guy].genotype[i] = (random & 0b1) ? ((random >> 1) % 100) / 100. : -(((random >> 1) % 100) / 100.);
+        }
+
+        #ifdef DEBUG_INIT_POP
+        cout << "Ind " << guy << ":";
+        for(int i = 0; i < CONNECT_NUM; i++){
+            cout << " " << pawnStars[guy].genotype[i];
+        }
+        cout << "\n";
+        #endif
+
+        sem_wait(sem_guys);
+        // Mark order's item as complete
+        (*compOrder)++;
+    }
+
+    sem_post(sem_guys);
+}
+
+/**
+ * @brief Generates initial population setting genotype to random values between -1 and 1 in every connection's weight.
  * 
- * @return true 
- * @return false 
+ * @return true if successful
+ * @return false if failed 
  */
 bool generate_init_population(){
     if(pawnStars == NULL) return false;
@@ -458,44 +493,30 @@ bool generate_init_population(){
     if(guyIndex == NULL) return false;
 
     guyIndex->index = 0;
+    *compOrder = 0;
 
-    // Distributed through PROCESS_NUM processes for faster execution
-    for(int p = 0, guy; p < PROCESS_NUM; p++){
-        process = p;
+    // Define order to give to processes
+    *order = GEN_INIT_POP;
+    sem_post(sig_order);
 
-        if(fork() == 0){
-            sem_wait(sem_guys);
-            while(guyIndex->index < POPULATION_NUM){
-                guy = (guyIndex->index)++;
-                sem_post(sem_guys);
-
-                for(int i = 0; i < CONNECT_NUM; i++){
-                    pawnStars[guy].genotype[i] = (rand()%2) ? (rand()%100) / 100. : -((rand()%100) / 100.);
-                }
-    
-                #ifdef DEBUG_INIT_POP
-                cout << "Ind " << guy << ":";
-                for(int i = 0; i < CONNECT_NUM; i++){
-                    cout << " " << pawnStars[guy].genotype[i];
-                }
-                cout << "\n";
-                #endif
-
-                sem_wait(sem_guys);
-            }
-            sem_post(sem_guys);
-
-            exit(0);
-        }
+    // Wait for all items relevant to given order to be completed
+    sem_wait(sem_guys);
+    while(*compOrder < POPULATION_NUM){
+        sem_post(sem_guys);
+        sem_wait(sem_guys);
     }
 
-    while(wait(NULL) != -1);
+    // Reset order values
+    *compOrder = 0;
+    *order = NO_ORDER;
     
     #else
 
     for(int guy = 0; guy < POPULATION_NUM; guy++){
-        for(int i = 0; i < CONNECT_NUM; i++){
-            pawnStars[guy].genotype[i] = (rand()%2) ? (rand()%100) / 100. : -((rand()%100) / 100.);
+        for(int i = 0, random; i < CONNECT_NUM; i++){
+            random = rand();
+
+            pawnStars[guy].genotype[i] = (random & 0b1) ? ((random >> 1) % 100) / 100. : -(((random >> 1) % 100) / 100.);
         }
 
         #ifdef DEBUG_INIT_POP
@@ -513,7 +534,8 @@ bool generate_init_population(){
 }
 
 /**
- * @brief Tests a generation of Individuals while coordinated with other processes.
+ * @brief Tests a generation of Individuals.
+ *  While coordinated with other processes.
  */
 void test_pop_proc(){
     sem_wait(sem_guys);
@@ -837,6 +859,11 @@ void work(){
         sem_wait(sig_order);
         
         switch(*order){
+            case GEN_INIT_POP:
+                // Generate initial population
+                gen_init_pop_proc();
+                break;
+
             case GEN_POP:
                 // TODO: Generate population
                 break;
